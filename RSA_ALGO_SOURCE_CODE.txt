@@ -1,0 +1,498 @@
+TITLE RSA.asm
+INCLUDE macros.inc
+INCLUDE Irvine32.inc
+
+; // ================================================================
+
+.Data
+maxbuffersize = 5000
+mydata byte maxbuffersize DUP(0),0
+
+k dword 0														; File handle i.e Length of file
+p DWORD ?														; p is a randomly generated 32 bits prime number
+q DWORD ?														; q is a randomly generated 32 bits prime number
+L_of_p DD ?														; Length of p
+L_of_q DD ?														; Length of q
+n   DWORD ?    
+phi DWORD ?
+tem DD ?
+public_key DWORD ?
+private_key DWORD ?
+
+count DWORD 0
+nam byte 10 dup(?),0
+filename byte 100 dup(?),0
+
+filehandle dword ?  
+
+prompt1_Interface byte "SELECT AN OPTION",0
+prompt2_Interface  byte "1- Encrypt the file",0
+prompt2a_Interface  byte "2- Decrypt the file",0
+           
+prompt byte "Input file name in .txt format : ",0
+prompt2 byte "Input the Private Key(d) : ",0
+prompt3 byte "Enter the N : ",0
+promptPrivate byte "Your Private Key(d) ",0
+promptN byte "Your value of N: ",0
+Quit_prompt byte "1 - Quit",0
+
+;// ===================================================================================
+
+.code
+;--------------------------READING FROM FILE--------------------------x
+
+FILE_READ PROC, file: PTR BYTE, buffer: PTR BYTE, buffersize:DWORD
+	mov edx,file												; opening file
+	call OpenInputFile
+	mov filehandle,eax
+
+	mov eax, filehandle											; assuming filehandle contains handle of an open file
+	mov edx, buffer												; buffer will contain the text read from the file
+	mov ecx,buffersize											; specify how many bytes to read
+	call ReadFromFile
+	mov k,eax													; storing handle of file
+	ret		
+	FILE_READ ENDP
+
+
+	FILE_CLOSE PROC
+	mov eax, filehandle											; assuming filehandle contains handle of an open file
+	call CloseFile
+	ret
+FILE_CLOSE ENDP
+					;--------------------------READING FROM FILE--------------------------x
+
+                    ;--------------------------WRITING TO FILE--------------------------x
+
+FILE_WRITE PROC, file: PTR byte, buffer: PTR byte, buffersize: DWORD
+	mov edx,file												; opening file
+	call CreateOutputFile
+	mov filehandle,eax
+
+	mov eax, filehandle											; assuming that filehandle contains handle of an open file
+	mov edx, buffer												; buffer from where text will be written to file
+	mov ecx, buffersize											; number of bytes to be written to file from the buffer
+	call WriteToFile
+	ret
+FILE_WRITE ENDP
+
+                         ;--------------------------WRITING TO FILE--------------------------x
+
+
+PRIME_CHK PROC													; Checking if generated P and Q are prime or not.
+	push ebp
+	mov ebp,esp
+	mov edx, 0
+	mov eax, [ebp+8]											; [ebp + 8] = value of p / q
+	mov ebx, 2
+	div ebx
+	mov edx,0
+	mov ecx, eax
+	L1:
+		mov eax,[ebp+8]
+		cdq														; Clears edx to store remainder
+		div ebx
+		cmp edx, 0
+		JE J1													; Remainder = 0
+		mov edi,1												; Flag
+		inc ebx
+	loop L1
+	JMP J2
+	J1:
+		mov edi,0												; Flag
+	J2:
+		mov esp,ebp
+		pop ebp
+		ret 
+PRIME_CHK ENDP
+
+NUM_Generator PROC, PARAM: PTR DWORD							; For generating value of p & q
+LOCAL temp:dword
+
+	CALL randomrange
+	add eax,9h
+	OR eax,1													; To change the last Digit to ODD
+
+	mov temp,eax
+	push eax
+	CALL PRIME_CHK												; If edi = 0 then !Prime
+
+	cmp edi,0
+	JE recursion												; Otherwise Repeat
+	mov eax,temp   
+	mov esi,PARAM
+	mov [esi] ,eax
+	jmp quit
+
+	recursion:
+		INVOKE NUM_Generator , PARAM							; recursively generate random number untill the number is prime
+
+	quit:
+		ret
+NUM_Generator ENDP
+
+Length_check PROC , x: DWORD
+	mov esi,0
+	mov eax,x
+	mov ecx,x
+	mov ebx,10
+	L1:
+		cdq
+		div ebx
+		inc esi
+		cmp eax,0
+		JE J1
+	loop L1
+	J1:
+		mov eax,esi
+		ret
+Length_check ENDP
+
+CALCULATE_PHI PROC												; phi = ( p - 1 ) * ( q - 1 )
+	mov eax,p 
+	dec eax
+	mov ebx,q
+	dec ebx
+	mul ebx
+	mov phi,eax
+	ret
+CALCULATE_PHI ENDP
+
+
+CALCULATE_N PROC												; n = ( p * q )
+	mov eax,p
+	mov ebx,q
+	mul ebx
+	mov n, eax
+	ret
+CALCULATE_N ENDP
+
+; To find GCD b/w (e , phi) 
+
+GCD PROC														;  (AJAR YEH SAMJHAO MUJHEY - AHSAN , WHY DID WE REPLACE QUOTIENTS AND REMAINDERS)
+	push ebx
+	mov eax,phi
+
+	find_gcd:
+		cdq
+		div ebx													; EBX = 
+		mov eax,ebx												; The divisor will become the quotient
+		mov ebx,edx												; The remainder will become the divisor
+		cmp ebx,0												; If remainder = 0 exit
+	jA find_gcd
+
+	pop ebx
+	ret
+GCD ENDP
+
+; This function generates public key (n,e)   ,e is the public exponent
+
+GENERATE_PUBLIC_KEY PROC
+	mov ecx,phi													; Value of e should be 1< e < phi
+	sub ecx, 2													; The range above is less than e therefore subtracting to keep within the range
+	mov ebx,3													; Starting with prime number greater than 1 to generate 'e'                   
+																; GCD(e,phi) == 1 
+	L1:
+		INVOKE gcd
+		cmp eax, 1												; Comparing if the gcd == 1 or not
+		je save													; If gcd = 1 then jump to 'save'
+		inc ebx													; Otherwise increment e & try again
+	loop L1
+
+	save:
+		mov public_key, ebx										; Saving e into public key
+		ret
+GENERATE_PUBLIC_KEY ENDP
+
+
+; for calculating d
+; (e*d) MOD phi = 1
+
+GENERATE_PRIVATE_KEY PROC
+	mov ecx,phi
+	mov ebx, 1													; Starting from 1 to calculate d
+	L1:
+		mov eax, public_key
+		mul ebx 
+		cdq
+		div phi						
+		cmp edx, 1												; If the remainder is 1 then it is private key
+		je J1
+		inc ebx
+	loop L1
+	J1:
+		mov private_key,ebx
+		ret
+GENERATE_PRIVATE_KEY ENDP
+
+; (text ^ e)  mod N
+; this function calculates the exponent with modular exponentition recursively -----
+
+MODULAR_EXPONENTIATION PROC, a: DWORD, b:DWORD, m: DWORD            ; a = byte of OTP , b = Public key , m = N
+	mov eax,1                                                       ; a= base         , b=power  ,       m = modulo of 
+
+	cmp a, 0														; If base = 0 then return 0
+	jne check_b                             
+	mov eax,0
+	je quit 
+    
+	check_b:														; If power = 0 then return 1                        
+		cmp b,0
+		jne if_b_even_odd
+		mov eax,1
+	je quit 
+
+	if_b_even_odd:													; Checking the power is Even OR ODD
+		test b,1
+		jz b_even													; An odd value's last bit = 1
+		jne b_odd
+
+	b_even:             
+		mov ebx,b													; ebx = power
+		shr ebx,1													; power dividing by 2
+
+		INVOKE MODULAR_EXPONENTIATION, a, ebx, m					; a=base , ebx=power/2 , m=N
+
+		mul eax    ; y*y
+		cdq
+		div m       ; (y*y)%m
+		mov eax , edx
+		jmp quit
+
+	b_odd:
+		mov eax, a          
+		cdq
+		div m
+		mov ebx,edx													; ebx = (base % m)
+		mov tem,ebx													; extra step
+		push tem
+
+	mov eax,b														; base power - 1
+	sub eax,1
+
+	INVOKE MODULAR_EXPONENTIATION, a, eax , m
+
+	pop tem
+
+	cdq
+	div m		;(5^0 % m) ka answer lene keliye , basically this is doing mod m with 5^0 ka answer
+
+	mov eax,edx     
+	mul tem		;ODD CONDITIONS													; ( a % m ) which is in ebx 
+																	; [ ( a % m ) * ( a ^ b - 1 ) % m ] % m
+
+	div m	;TOTAL MOD LELIA
+	mov eax, edx	;Giving the mod 
+	jmp quit
+
+	quit:
+		ret
+MODULAR_EXPONENTIATION ENDP
+
+ENCODE PROC
+	mov ecx,k
+	mov esi, 0
+	L_enc:
+		mov edi,ecx
+		movzx eax, mydata[esi]
+		;sub eax,48
+
+		INVOKE MODULAR_EXPONENTIATION,eax,public_key,n
+
+		;add eax,48
+		mov mydata[esi], al
+		inc esi
+		mov ecx,edi
+	loop L_enc
+	ret
+ENCODE ENDP
+
+RSA_Encryption PROC
+
+	INVOKE NUM_Generator , ADDR p										; Generating p(Prime Number)
+
+	again:
+		INVOKE NUM_Generator , ADDR q									; Generating q(Prime Number)
+				
+		INVOKE Length_check , ADDR p
+		mov L_of_p , eax
+
+		INVOKE Length_check , ADDR q
+		mov L_of_q , eax												; The length of both the prime numbers shall be same.
+
+		mov eax,L_of_p
+		cmp eax,L_of_q
+	JNE again
+
+	INVOKE CALCULATE_N
+
+	INVOKE CALCULATE_PHI
+
+	INVOKE GENERATE_PUBLIC_KEY
+
+	INVOKE GENERATE_PRIVATE_KEY
+
+	INVOKE ENCODE
+
+ret
+RSA_Encryption ENDP
+
+
+                    ;--------------------------------------------------------------------------;
+
+RSA_Decryption PROC
+	mov ecx,k
+	mov esi, 0
+
+	decode:
+		mov edi,ecx
+		movzx eax, mydata[esi]
+		mov ebx,private_key
+
+		INVOKE MODULAR_EXPONENTIATION, eax,ebx, n
+
+		mov mydata[esi], al
+		inc esi
+		mov ecx,edi
+	loop decode
+	ret
+RSA_Decryption ENDP
+
+;-------------------------------------------------------------------------------------------------------------
+
+main PROC
+
+																			; Interface Handling
+mov edx,offset prompt
+call writestring
+call crlf
+mov ecx,lengthof filename													; Inputs the file name.
+mov edx,offset filename
+mov eax, black + (lightblue* 16)
+call settextcolor
+call readstring
+
+call crlf
+call crlf
+
+mov edx,offset prompt1_Interface											; Prompt to select an option
+mov eax, black + (lightblue* 16)
+call settextcolor 
+call writestring
+call crlf
+call crlf
+
+
+mov edx,offset prompt2_Interface											; 1.If he wishes to encrpypt
+mov eax, black + (lightblue* 16)
+call settextcolor 
+call writestring
+call crlf
+call crlf 
+
+mov edx,offset prompt2a_Interface											; 2.If he wish to decrypt
+mov eax, black + (lightblue* 16)
+call settextcolor 
+call writestring
+call crlf
+call crlf
+
+mov eax, black + (lightblue* 16)
+call settextcolor
+call readdec
+cmp eax,2
+JE Decryption  ;If choice =2 then decrypt the file.
+
+
+INVOKE FILE_READ, ADDR filename, ADDR mydata, maxbuffersize					; filename = which file to read    ,    mydata = contains file data.
+call FILE_CLOSE
+
+
+
+								; --------------encrypting FILE using RSA --------------------------------------
+
+INVOKE RSA_Encryption
+call crlf
+
+
+INVOKE FILE_WRITE, ADDR filename, ADDR mydata, k							; filename = the file where you wirte the data      ,       mydata = the array which you will write in the file 
+call FILE_CLOSE
+call crlf
+
+call crlf
+
+
+mov edx,offset promptPrivate 
+mov ecx,lengthof promptPrivate 
+call writestring
+mov eax,private_key
+call writedec
+call crlf
+
+mov edx,offset promptN 
+call writestring
+mov eax,n
+call writedec
+call crlf
+call crlf
+call crlf
+
+
+mov edx, offset prompt1_Interface 
+mov ecx,lengthof prompt1_Interface
+mov eax, black + (lightblue* 16)
+call settextcolor
+call writestring
+call crlf
+call crlf
+
+mov edx, offset Quit_prompt
+mov ecx,lengthof Quit_prompt
+mov eax, black + (lightblue* 16)
+call settextcolor
+call writestring
+call crlf
+call crlf
+
+mov edx, offset prompt2a_Interface  
+mov eax, black + (lightblue* 16)
+call settextcolor
+call writestring
+call crlf
+
+call readdec
+
+
+cmp eax,1
+je Quit	
+
+
+                             ; ----------------------------decrypting FILE using RSA -------------------------------
+
+Decryption:
+	INVOKE FILE_READ, ADDR filename, ADDR mydata, maxbuffersize
+	call FILE_CLOSE
+
+	mov edx,offset prompt2
+	call writestring
+	call readdec
+	mov private_key,eax
+
+	mov edx ,offset prompt3
+	call writestring
+
+	call readdec
+	mov n,eax
+
+	INVOKE RSA_Decryption
+	call crlf
+
+	INVOKE FILE_WRITE,ADDR filename, ADDR mydata, k
+	call FILE_CLOSE
+
+Quit:
+	call crlf  
+
+exit
+main ENDP
+END main
